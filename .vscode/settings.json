@@ -1,3 +1,4 @@
 {
-    "cmake.sourceDirectory": "C:/Users/cool/Desktop/db2023"
+    "cmake.sourceDirectory": "C:/Users/cool/Desktop/db2023",
+    "C_Cpp.errorSquiggles": "disabled"
 }
