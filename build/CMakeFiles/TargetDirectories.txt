@@ -1,0 +1,9 @@
+C:/Users/cool/Desktop/db2023/build/CMakeFiles/Experimental.dir
+C:/Users/cool/Desktop/db2023/build/CMakeFiles/Nightly.dir
+C:/Users/cool/Desktop/db2023/build/CMakeFiles/Continuous.dir
+C:/Users/cool/Desktop/db2023/build/CMakeFiles/NightlyMemoryCheck.dir
+C:/Users/cool/Desktop/db2023/build/CMakeFiles/sample.dir
+C:/Users/cool/Desktop/db2023/build/CMakeFiles/PACKAGE.dir
+C:/Users/cool/Desktop/db2023/build/CMakeFiles/RUN_TESTS.dir
+C:/Users/cool/Desktop/db2023/build/CMakeFiles/ALL_BUILD.dir
+C:/Users/cool/Desktop/db2023/build/CMakeFiles/ZERO_CHECK.dir
