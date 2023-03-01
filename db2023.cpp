@@ -168,8 +168,7 @@ template <typename R> class DB {
         seekToRecord(0);
         const auto count = rowCount();
         R r = {};
-        m_uidIndex.resize(
-            count + 1); // These start at one, so we need to add one.
+        m_uidIndex.resize(count);
         countType ctr = 0;
 
         while (ctr < count) {
@@ -213,10 +212,10 @@ template <typename R> class DB {
         if (uid == 0) {
             throw std::runtime_error("uid0 is not a valid uid");
         }
-        if (uid - 1 >= m_uidIndex.size()) {
+        if (uid >= m_uidIndex.size()) {
             throw std::runtime_error("rowIndexFromUID: out of range uid");
         }
-        return m_uidIndex[uid - 1];
+        return m_uidIndex[uid];
     }
 
     using RecordType = R;
