@@ -125,10 +125,13 @@ template <typename R> class DB {
         if (m_hdr.version != 1) {
             throw std::runtime_error("Header: bad version");
         }
-        if (m_hdr.rowCount != calcRowCount()) {
+        const auto calced = calcRowCount();
+        if (m_hdr.rowCount != calced) {
             throw std::runtime_error("Header: bad row count");
         }
-        if (m_hdr.recordSize != sizeof(R)) {
+        m_rowCount = calced;
+        const auto szR = sizeof(R);
+        if (m_hdr.recordSize != szR) {
             throw std::runtime_error("Header: bad record size.");
         }
         return m_hdr;
@@ -144,9 +147,10 @@ template <typename R> class DB {
             throw std::runtime_error("DB, with filepath: " + m_filePath
                 + " is corrupt. The size is wrong");
         }
-
-        uint32_t adj = static_cast<uint32_t>(adjustedSize);
-        return adj / sizeof(R);
+        const auto szR = sizeof(R);
+        countType adj = static_cast<countType>(adjustedSize);
+        const auto ret = adj / (countType)szR;
+        return ret;
     }
     void seekToRecord(const countType which) {
         const auto start = sizeof(m_hdr);
@@ -164,16 +168,18 @@ template <typename R> class DB {
         seekToRecord(0);
         const auto count = rowCount();
         R r = {};
-        m_uidIndex.resize(count);
+        m_uidIndex.resize(
+            count + 1); // These start at one, so we need to add one.
         countType ctr = 0;
+
         while (ctr < count) {
             m_f.read((char*)&r, sizeof(R));
             if (!m_f) {
                 throw std::runtime_error(
                     "Bad readAll as position: " + ctr + m_filePath);
             }
-            m_uidIndex[r.uid]
-                = ctr; // these *MAY NOT* be the same after many deletes, etc
+            assert(r.uid > 0); // 0 is INVALID_UID
+            m_uidIndex[r.uid - 1] = ctr;
             if (avoidCallbackAbort) {
                 cb(r);
             } else {
@@ -202,6 +208,15 @@ template <typename R> class DB {
         readAll(cb, true);
         static_assert(std::is_base_of_v<RecordBase, R>);
         static_assert(std::is_trivial_v<R>);
+    }
+    countType rowIndexFromUID(countType uid) {
+        if (uid == 0) {
+            throw std::runtime_error("uid0 is not a valid uid");
+        }
+        if (uid - 1 >= m_uidIndex.size()) {
+            throw std::runtime_error("rowIndexFromUID: out of range uid");
+        }
+        return m_uidIndex[uid - 1];
     }
 
     using RecordType = R;
@@ -233,6 +248,8 @@ template <typename DB> class DBWriter {
         bool ok = true;
         f.seekp(0, std::ios::end);
         oldRowCount = m_db.rowCount();
+        newRowCount = oldRowCount;
+
         RecordType r = {};
         while (ok) {
             r.uid = m_db.nextUID();
@@ -251,19 +268,25 @@ template <typename DB> class DBWriter {
                 ok = false;
             }
         };
-        if (newRowCount != oldRowCount && newRowCount) {
-            m_db.writeHeader(newRowCount);
-        }
+        finish();
     }
 
     countType newRowCount{0};
     countType oldRowCount{0};
 
-    ~DBWriter() {
+    void finish() {
         if (newRowCount != oldRowCount && newRowCount) {
             m_db.writeHeader(newRowCount);
+            const auto c = m_db.calcRowCount();
+            const auto r = m_db.rowCount();
+            assert(c == r);
+            newRowCount = oldRowCount;
+            // re-index
+            m_db.readAll([](auto&) { return 0; }, true);
         }
     }
+
+    ~DBWriter() { finish(); }
 };
 
 } // namespace db2023
@@ -299,7 +322,7 @@ int main() {
     try {
 
         // This next one should throw
-        db2023::DB<mystructBigger>(
+        db2023::DB<mystructBigger> BadDB(
             filePath, [](const mystructBigger&) { return 0; });
     } catch (const std::exception& e) {
         cout << "Correctly threw: " << e.what() << endl;
@@ -308,15 +331,27 @@ int main() {
     assert(threw);
 
     size_t ctr = 0;
-    if (DB.rowCount() != 100'000) {
+    const auto countNow = DB.rowCount();
+    if (countNow < 100) {
         db2023::DBWriter myWriter(DB, [&](mystruct& r) {
             const auto s = std::to_string(ctr);
             memcpy(r.artist, s.data(), s.size());
-            if (ctr++ >= 100'000) return 0;
+            if (ctr++ >= 100) return 0;
             return 1;
         });
     }
 
-    assert(DB.rowCount() == 100'000);
+    const auto newCount = DB.rowCount() + 10;
+    ctr = DB.rowCount();
+    db2023::DBWriter myWriter(DB, [&](mystruct& r) {
+        const auto s = std::to_string(ctr);
+        memcpy(r.artist, s.data(), s.size());
+        if (ctr++ >= newCount) return 0;
+        return 1;
+    });
+
+    const auto myCount = DB.rowCount();
+    assert(myCount == newCount);
+    const auto rw = DB.rowIndexFromUID(myCount);
     return 0;
 }
