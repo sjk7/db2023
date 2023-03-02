@@ -1,4 +1,4 @@
-#pragma once
+// #pragma once
 
 #include <string>
 #include <string_view>
@@ -8,11 +8,17 @@
 #include <vector>
 #include <cassert>
 #include <iostream>
+#include <set> // uidchecker
 
 #ifdef _WIN32
 #include <io.h>
 #define F_OK 0
 #define access _access
+#else
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+
 #endif
 
 namespace db2023 {
@@ -24,6 +30,9 @@ struct RecordBase {
     uint32_t flags;
     uint32_t reserved;
 };
+
+static inline constexpr countType INVALID_UID = 0;
+static inline constexpr countType INVALID_ROW = -1;
 struct header {
     countType magic;
     countType version;
@@ -50,6 +59,16 @@ auto fileSize(const std::string& fp) {
     return st.st_size;
 
 #else
+#ifdef __APPLE__
+    struct stat st; // stat() is always 64-bit on mac, it seems.
+    int result = stat(fp.c_str(), &st);
+    if (result != 0) {
+        throw std::runtime_error("Cannot get status for file: " + fp);
+    }
+    return st.st_size;
+
+#else
+
     struct stat64 st;
     int result = stat64(fp.c_str(), &st);
     if (result != 0) {
@@ -57,7 +76,24 @@ auto fileSize(const std::string& fp) {
     }
     return st.st_size;
 #endif
+#endif
 }
+
+struct ReadFlags {
+    static constexpr unsigned int avoidCallbackAbort = 2;
+    static constexpr unsigned int DEFAULT = avoidCallbackAbort;
+    static constexpr unsigned int recursing = 4;
+    static constexpr unsigned int repairFlag = 8;
+};
+struct SeekWhat {
+    static constexpr unsigned int read = 2;
+    static constexpr unsigned int write = 4;
+};
+
+struct DBState {
+    static inline constexpr unsigned int allOK = 0;
+    static inline constexpr unsigned int uidsInconsistent = 2;
+};
 
 template <typename R> class DB {
     DB() = delete;
@@ -152,47 +188,228 @@ template <typename R> class DB {
         const auto ret = adj / (countType)szR;
         return ret;
     }
-    void seekToRecord(const countType which) {
+
+    unsigned int state() const noexcept { return m_state; }
+
+    auto seekToRecord(
+        const countType where, unsigned int which = SeekWhat::read) {
         const auto start = sizeof(m_hdr);
         const auto avail = fileSize(m_filePath);
-        const auto pos = start + (which * sizeof(R));
-        m_f.seekg(pos);
-        if (!m_f) {
-            throw std::runtime_error("Unable to seek to record "
-                + std::to_string(which) + " " + m_filePath);
+        const auto pos = start + (where * sizeof(R));
+        if (which & SeekWhat::read) {
+            m_f.seekg(pos);
+            if (!m_f) {
+                throw std::runtime_error("Unable to seek to record (for read) "
+                    + std::to_string(which) + " " + m_filePath);
+            }
         }
+        if (which & SeekWhat::write) {
+            m_f.seekp(pos);
+            if (!m_f) {
+                throw std::runtime_error("Unable to seek to record (for write) "
+                    + std::to_string(which) + " " + m_filePath);
+            }
+        }
+        return pos;
     }
 
     template <typename CB>
-    void readAll(CB&& cb, bool avoidCallbackAbort = false) {
-        seekToRecord(0);
+    void readAll(CB&& cb, uint32_t flags = ReadFlags::DEFAULT) {
+        seekToRecord(0, SeekWhat::read);
         const auto count = rowCount();
         R r = {};
         m_uidIndex.resize(count);
+        // we take a guess here, since if we failed with bad uids,
+        // we need somewhere to create UIDs from!
+        this->m_uidNext = count;
+        std::fill(m_uidIndex.begin(), m_uidIndex.end(), INVALID_ROW);
         countType ctr = 0;
+        auto highestUID = INVALID_UID;
+        std::set<countType> uidCheck;
 
         while (ctr < count) {
             m_f.read((char*)&r, sizeof(R));
             if (!m_f) {
-                throw std::runtime_error(
-                    "Bad readAll as position: " + ctr + m_filePath);
+                throw std::runtime_error("Bad readAll as position: "
+                    + std::to_string(ctr) + m_filePath);
             }
-            assert(r.uid > 0); // 0 is INVALID_UID
+            if (r.uid > highestUID) highestUID = r.uid;
+            assert(r.uid > INVALID_UID);
+            if (r.uid - 1 >= m_uidIndex.size()) {
+                const auto old_size = m_uidIndex.size();
+                m_uidIndex.resize(r.uid);
+                const auto new_size = m_uidIndex.size();
+                std::fill(m_uidIndex.begin() + old_size, m_uidIndex.end(),
+                    INVALID_ROW);
+                m_state |= DBState::uidsInconsistent;
+            }
+            assert(r.uid - 1 < m_uidIndex.size());
             m_uidIndex[r.uid - 1] = ctr;
-            if (avoidCallbackAbort) {
+            //// checking for duplicate UID .. /////
+            const auto found = uidCheck.find(r.uid);
+            if (found != uidCheck.cend()) {
+                if (flags & ReadFlags::recursing) {
+                    throw std::runtime_error("Bad DB, uids are not unique. DB "
+                                             "Repair failed for "
+                        + m_filePath);
+                } else {
+                    if (flags & ReadFlags::repairFlag) {
+                        this->UIDRepair();
+                        return;
+                    } else {
+                        throw std::runtime_error(
+                            "Bad DB, uids are not unique. Try "
+                            "again with the repair flag set, for file: "
+                            + m_filePath);
+                    }
+                }
+            }
+            uidCheck.insert(r.uid);
+            //// ///////////////////////////////////
+            ///
+            if (flags & ReadFlags::avoidCallbackAbort) {
                 cb(r);
             } else {
                 if (cb(r) < 0) break;
             }
             ++ctr;
         }
+
+#ifndef NDEBUG
+        checkUIDSanity(highestUID);
+#endif
+    }
+
+    void checkUIDSanity(const countType highestUID) {
+        this->m_uidNext = highestUID;
+        auto test = this->nextUID(true);
+        assert(test == highestUID + 1);
+        test = this->nextUID(true);
+        assert(test == highestUID + 1);
+        test = this->nextUID();
+        assert(test == highestUID + 1);
+        test = this->nextUID();
+        assert(test == highestUID + 2);
+        this->m_uidNext = highestUID; // put it back!
+    }
+
+    void reIndex() {
+        seekToRecord(0, SeekWhat::read | SeekWhat::write);
+        m_rowCount = calcRowCount();
+        countType highestUID = 0;
+
+        R r = {};
+        // this pass to get highest UID
+        countType c = 0;
+        while (c < m_rowCount) {
+            m_f.read((char*)&r, sizeof(R));
+            if (!m_f) {
+                throw std::runtime_error(
+                    "Bad file in reIndex(). Likely file is corrupt: "
+                    + m_filePath);
+            }
+            if (r.uid >= highestUID) highestUID = r.uid;
+            ++c;
+        }
+        m_uidIndex.resize(highestUID + 1); // uids are 1-based.
+        std::fill(m_uidIndex.begin(), m_uidIndex.end(), INVALID_ROW);
+
+        c = 0;
+        countType expectedUID = 0;
+        seekToRecord(0, SeekWhat::read | SeekWhat::write);
+        while (c < m_rowCount) {
+            ++expectedUID;
+            m_f.read((char*)&r, sizeof(R));
+            if (!m_f) {
+                throw std::runtime_error(
+                    "Bad file in reIndex(). Likely file is corrupt: "
+                    + m_filePath);
+            }
+
+            if (r.uid != expectedUID) {
+                r.uid = expectedUID;
+                seekToRecord(c, SeekWhat::write);
+                m_f.write((char*)&r, sizeof(R));
+                if (!m_f) {
+                    throw std::runtime_error("Bad file in reIndex(), after "
+                                             "write. Likely file is corrupt: "
+                        + m_filePath);
+                }
+            }
+            ++c;
+        }
+    }
+
+    void UIDRepair() {
+        reIndex();
+        // careful here: likely uidIndex is not fully formed,
+        // so don't use it.
+        /*/
+        auto recordPos = seekToRecord(0, SeekWhat::read | SeekWhat::write);
+
+        std::set<countType> checker;
+        R r = {};
+        const auto rwCount = rowCount() ? rowCount() : calcRowCount();
+        this->m_uidNext = rwCount; // guess as best we can
+        countType curRow = 0;
+
+        auto wtf = sizeof(m_hdr) + sizeof(R);
+        std::cout << wtf << std::endl;
+
+        while (curRow < rwCount) {
+            const auto readPos = m_f.tellg();
+            m_f.read((char*)&r, sizeof(r));
+            if (!m_f) {
+                perror("file is bad\n");
+                throw std::runtime_error(
+                    "UID repair: file is bad whilst reading record.");
+            }
+            ++curRow;
+            recordPos += sizeof(R);
+            const auto found = checker.find(r.uid);
+            if (found != checker.cend()) {
+                r.uid = nextUID();
+                const auto myrecordpos = m_f.tellg()
+                    - static_cast<decltype(m_f.tellg())>(sizeof(R));
+                const auto compare = seekToRecord(curRow - 1, SeekWhat::write);
+                const std::ptrdiff_t diff = compare - myrecordpos;
+                assert(compare == myrecordpos);
+                assert(myrecordpos == readPos);
+                if (!m_f) {
+                    perror("file is bad\n");
+                    throw std::runtime_error(
+                        "UID repair: file is bad after seekp.");
+                }
+                m_f.write((char*)&r, sizeof(r));
+
+                if (!m_f) {
+                    throw std::runtime_error(
+                        "UID repair: file is bad after seekp.");
+                }
+            }
+            checker.insert(r.uid);
+        };
+        m_f.flush();
+        readAll([](const R&) { return 0; },
+            ReadFlags::recursing | ReadFlags::avoidCallbackAbort);
+/*/
+        return;
     }
     std::vector<countType> m_uidIndex;
     std::string m_filePath;
     countType m_rowCount{0};
     countType m_uidNext{0};
     std::fstream m_f;
-    countType nextUID() { return ++m_uidNext; }
+    unsigned int m_state = DBState::allOK;
+
+    countType nextUID(bool peek = false) {
+        if (!peek) {
+            return ++m_uidNext;
+        } else {
+            const auto ret = m_uidNext + 1;
+            return ret;
+        }
+    }
 
     R createNewRecord() {
         R ret{};
@@ -202,20 +419,39 @@ template <typename R> class DB {
 
     public:
     template <typename CB>
-    DB(const std::string& filePath, CB&& cb) : DB(filePath) {
+    DB(const std::string& filePath, CB&& cb,
+        unsigned int flags = ReadFlags::DEFAULT)
+        : DB(filePath) {
         open(filePath);
-        readAll(cb, true);
+        readAll(cb, flags);
         static_assert(std::is_base_of_v<RecordBase, R>);
         static_assert(std::is_trivial_v<R>);
     }
+
+    void close() {
+        if (m_f.is_open()) m_f.close();
+        this->m_filePath.clear();
+        this->m_rowCount = 0;
+        this->m_uidIndex.clear();
+        this->m_uidNext = 0;
+    }
+
+    const std::string& filePath() const noexcept {
+        return this->m_filePath;
+    }
+
     countType rowIndexFromUID(countType uid) {
         if (uid == 0) {
             throw std::runtime_error("uid0 is not a valid uid");
         }
-        if (uid >= m_uidIndex.size()) {
+        const auto idxsz = m_uidIndex.size();
+        const auto nRows = this->rowCount();
+        (void)nRows;
+        const auto key = uid - 1;
+        if (key >= idxsz) {
             throw std::runtime_error("rowIndexFromUID: out of range uid");
         }
-        return m_uidIndex[uid];
+        return m_uidIndex[key];
     }
 
     using RecordType = R;
@@ -232,7 +468,9 @@ template <typename R> class DB {
         }
     }
 
-    countType rowCount() const noexcept { return m_rowCount; }
+    countType rowCount() const noexcept {
+        return m_rowCount;
+    }
 };
 
 template <typename DB> class DBWriter {
@@ -241,6 +479,7 @@ template <typename DB> class DBWriter {
     using RecordType = typename DB::RecordType;
 
     public:
+    // This will add new records all the while your callback returns true
     template <typename CB> DBWriter(DB& db, CB&& cb) : m_db(db) {
 
         auto& f = db.m_f;
@@ -251,7 +490,8 @@ template <typename DB> class DBWriter {
 
         RecordType r = {};
         while (ok) {
-            r.uid = m_db.nextUID();
+            r.uid = m_db.nextUID(true);
+
             if (cb(r)) {
                 f.write((char*)&r, sizeof(RecordType));
                 if (!f) {
@@ -262,6 +502,9 @@ template <typename DB> class DBWriter {
                     ok = false;
                 }
                 ++newRowCount;
+                r.uid = m_db.nextUID(); // I know it doesn't do anything useful
+                                        // to the record here, but we should
+                                        // only increment on succerss
 
             } else {
                 ok = false;
@@ -281,12 +524,76 @@ template <typename DB> class DBWriter {
             assert(c == r);
             newRowCount = oldRowCount;
             // re-index
-            m_db.readAll([](auto&) { return 0; }, true);
+            m_db.readAll([](auto&) { return 0; }, ReadFlags::DEFAULT);
         }
     }
 
     ~DBWriter() { finish(); }
 };
+
+namespace tests {
+    // break a db by buggering up uids when writing
+    std::string serr;
+    template <typename DB> static inline void breakKnownGoodDB(DB& db) {
+        countType broken = 0;
+        bool thrown = false;
+        try {
+            // this will throw as it encounters fucked-up uids when
+            // ir re-indexes after saving.
+            db2023::DBWriter myWriter(db, [&](typename DB::RecordType& r) {
+                if (r.uid % 10 == 0) {
+                    r.uid = 10;
+                    ++broken;
+                }
+
+                if (broken > 2) return false;
+                return true;
+            });
+        } catch (const std::exception& e) {
+            std::cerr << "GOOD! Threw " << e.what() << ", as expected";
+            thrown = true;
+        }
+
+        assert(thrown);
+    }
+
+    template <typename DB> static inline void testRepair(DB& db) {
+        using R = typename DB::RecordType;
+        db2023::tests::breakKnownGoodDB(db);
+        const auto filePath = db.filePath();
+        db.close();
+
+        bool threw = false;
+        try {
+            db2023::DB<R> badDB(filePath, [](const R&) { return 0; });
+
+        } catch (const std::exception& e) {
+            std::cerr << "Good. expected this exception: " << e.what()
+                      << std::endl;
+            serr = e.what();
+            threw = true;
+        }
+        assert(threw);
+        threw = false;
+
+        try {
+            db2023::DB<R> repairedDB(
+                filePath, [](const R&) { return 0; },
+                db2023::ReadFlags::repairFlag);
+
+        } catch (const std::exception& e) {
+            std::cerr << "BAD! did not expect this exception: " << e.what()
+                      << std::endl;
+            serr = e.what();
+            threw = true;
+        }
+        assert(!threw);
+        if (!threw) {
+            std::cout << "OK, repaired!" << std::endl;
+        }
+    }
+
+} // namespace tests
 
 } // namespace db2023
 
@@ -310,13 +617,14 @@ struct mystructBigger : mystruct {
 };
 
 int main() {
+    using std::cerr;
     using std::cout;
     using std::endl;
 
     bool threw = false;
 
     std::string filePath("test.db");
-    // This one should not throw (though it will be empty)
+    // This one should not throw (though it may be empty)
     db2023::DB<mystruct> DB(filePath, [](const mystruct&) { return 0; });
     try {
 
@@ -351,6 +659,10 @@ int main() {
 
     const auto myCount = DB.rowCount();
     assert(myCount == newCount);
-    const auto rw = DB.rowIndexFromUID(myCount);
+    const auto rwIndex = DB.rowIndexFromUID(myCount);
+    assert(rwIndex == myCount - 1);
+
+    db2023::tests::testRepair(DB);
+
     return 0;
 }
