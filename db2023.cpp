@@ -1,4 +1,8 @@
-// #pragma once
+// This is an independent project of an individual developer. Dear PVS-Studio,
+// please check it.
+
+// PVS-Studio Static Code Analyzer for C, C++, C#, and Java:
+// http://www.viva64.com
 
 #include <string>
 #include <string_view>
@@ -179,7 +183,7 @@ template <typename R> class DB {
         const double adjustedSize = (double)(sz - sizeof(m_hdr));
         double dec = 0;
         const auto fractPart = std::modf(adjustedSize, &dec);
-        if (fractPart != 0) {
+        if (fabs(fractPart) > std::numeric_limits<double>::epsilon()) {
             throw std::runtime_error("DB, with filepath: " + m_filePath
                 + " is corrupt. The size is wrong");
         }
@@ -341,6 +345,9 @@ template <typename R> class DB {
     }
 
     void UIDRepair() {
+
+        const auto sz = sizeof(R);
+        assert(sz == 672); // on Windows, at least
         reIndex();
         // careful here: likely uidIndex is not fully formed,
         // so don't use it.
@@ -436,9 +443,7 @@ template <typename R> class DB {
         this->m_uidNext = 0;
     }
 
-    const std::string& filePath() const noexcept {
-        return this->m_filePath;
-    }
+    const std::string& filePath() const noexcept { return this->m_filePath; }
 
     countType rowIndexFromUID(countType uid) {
         if (uid == 0) {
@@ -468,9 +473,7 @@ template <typename R> class DB {
         }
     }
 
-    countType rowCount() const noexcept {
-        return m_rowCount;
-    }
+    countType rowCount() const noexcept { return m_rowCount; }
 };
 
 template <typename DB> class DBWriter {
@@ -498,8 +501,8 @@ template <typename DB> class DBWriter {
                     if (newRowCount != oldRowCount) {
                         m_db.writeHeader(newRowCount);
                     }
-                    throw std::runtime_error("DBWriter: file is bad");
                     ok = false;
+                    throw std::runtime_error("DBWriter: file is bad");
                 }
                 ++newRowCount;
                 r.uid = m_db.nextUID(); // I know it doesn't do anything useful
@@ -607,12 +610,7 @@ struct mystruct : db2023::RecordBase {
 };
 
 struct mystructBigger : mystruct {
-    char artist[32];
-    char title[32];
-    char categories[64];
-    uint32_t intro[4];
-    char filepath[512];
-    uint8_t opener;
+
     uint8_t reserved;
 };
 
@@ -661,6 +659,7 @@ int main() {
     assert(myCount == newCount);
     const auto rwIndex = DB.rowIndexFromUID(myCount);
     assert(rwIndex == myCount - 1);
+    cout << "There are now " << myCount << " rows in the db." << endl;
 
     db2023::tests::testRepair(DB);
 
