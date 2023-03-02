@@ -13,6 +13,7 @@
 #include <cassert>
 #include <iostream>
 #include <set> // uidchecker
+#include <cstring> // memcpy
 
 #ifdef _WIN32
 #include <io.h>
