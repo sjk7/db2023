@@ -26,7 +26,7 @@
 #endif
 
 namespace db2023 {
-using countType = std::uint32_t;
+using countType = uint32_t;
 static inline uint32_t constexpr MAGIC = 558819;
 
 struct RecordBase {
@@ -151,10 +151,15 @@ template <typename R> class DB {
     }
     header m_hdr{};
     header& read_header(std::fstream& f, const std::string& fp) {
+
         f.seekg(0);
         f.read((char*)&m_hdr, sizeof(m_hdr));
         if (!f) {
             throw std::runtime_error("Cannot read header in file: " + fp);
+        }
+        const auto szR = sizeof(R);
+        if (m_hdr.recordSize != szR) {
+            throw std::runtime_error("Header: bad record size.");
         }
         if (m_hdr.magic != MAGIC) {
             throw std::runtime_error("Header: bad magic");
@@ -170,10 +175,7 @@ template <typename R> class DB {
             throw std::runtime_error("Header: bad row count");
         }
         m_rowCount = calced;
-        const auto szR = sizeof(R);
-        if (m_hdr.recordSize != szR) {
-            throw std::runtime_error("Header: bad record size.");
-        }
+
         return m_hdr;
     }
 
@@ -612,6 +614,7 @@ struct mystruct : db2023::RecordBase {
 struct mystructBigger : mystruct {
 
     uint8_t reserved;
+    uint32_t more_reserved;
 };
 
 int main() {
