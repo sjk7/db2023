@@ -1,4 +1,5 @@
 {
-    "cmake.sourceDirectory": "C:/Users/cool/Desktop/db2023",
-    "C_Cpp.errorSquiggles": "disabled"
+    "cmake.sourceDirectory": "${workspaceFolder}/.",
+    "C_Cpp.errorSquiggles": "disabled",
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools"
 }

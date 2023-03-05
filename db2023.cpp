@@ -4,25 +4,26 @@
 // PVS-Studio Static Code Analyzer for C, C++, C#, and Java:
 // http://www.viva64.com
 
-#include <string>
-#include <string_view>
-#include <cstdint>
-#include <fstream>
-#include <cmath>
-#include <vector>
 #include <cassert>
+#include <cmath>
+#include <cstdint>
+#include <cstring> // memcpy
+#include <fstream>
 #include <iostream>
 #include <set> // uidchecker
-#include <cstring> // memcpy
+#include <string>
+#include <string_view>
+#include <vector>
+#include "../utils/my_timing.hpp"
 
 #ifdef _WIN32
 #include <io.h>
 #define F_OK 0
 #define access _access
 #else
-#include <unistd.h>
-#include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #endif
 
@@ -143,6 +144,7 @@ template <typename R> class DB {
             throw std::runtime_error(
                 "Cannot write header to file: " + filePath);
         }
+        m_f.flush();
     }
 
     void writeHeader(countType newRowCount) {
@@ -264,6 +266,7 @@ template <typename R> class DB {
                         this->UIDRepair();
                         return;
                     } else {
+                        // reIndex();
                         throw std::runtime_error(
                             "Bad DB, uids are not unique. Try "
                             "again with the repair flag set, for file: "
@@ -324,9 +327,17 @@ template <typename R> class DB {
         c = 0;
         countType expectedUID = 0;
         seekToRecord(0, SeekWhat::read | SeekWhat::write);
+        /*/
+        When switching between input and output for a filestream
+            without an intervening seek, you get undefined behavior.
+            It doesn't matter where you seek to but you need to seek!
+        /*/
+        // auto expectedReadPos = sizeof(m_hdr);
         while (c < m_rowCount) {
             ++expectedUID;
+            seekToRecord(c, SeekWhat::read);
             m_f.read((char*)&r, sizeof(R));
+            // expectedReadPos += sizeof(R);
             if (!m_f) {
                 throw std::runtime_error(
                     "Bad file in reIndex(). Likely file is corrupt: "
@@ -334,7 +345,9 @@ template <typename R> class DB {
             }
 
             if (r.uid != expectedUID) {
+                assert(r.uid == 10); // we only ever fake it thus
                 r.uid = expectedUID;
+
                 seekToRecord(c, SeekWhat::write);
                 m_f.write((char*)&r, sizeof(R));
                 if (!m_f) {
@@ -343,8 +356,12 @@ template <typename R> class DB {
                         + m_filePath);
                 }
             }
+            m_uidIndex[r.uid - 1] = c;
+
             ++c;
         }
+        writeHeader(c);
+        m_f.flush();
     }
 
     void UIDRepair() {
@@ -446,7 +463,9 @@ template <typename R> class DB {
         this->m_uidNext = 0;
     }
 
-    const std::string& filePath() const noexcept { return this->m_filePath; }
+    const std::string& filePath() const noexcept {
+        return this->m_filePath;
+    }
 
     countType rowIndexFromUID(countType uid) {
         if (uid == 0) {
@@ -476,7 +495,9 @@ template <typename R> class DB {
         }
     }
 
-    countType rowCount() const noexcept { return m_rowCount; }
+    countType rowCount() const noexcept {
+        return m_rowCount;
+    }
 };
 
 template <typename DB> class DBWriter {
@@ -511,7 +532,6 @@ template <typename DB> class DBWriter {
                 r.uid = m_db.nextUID(); // I know it doesn't do anything useful
                                         // to the record here, but we should
                                         // only increment on succerss
-
             } else {
                 ok = false;
             }
@@ -525,6 +545,7 @@ template <typename DB> class DBWriter {
     void finish() {
         if (newRowCount != oldRowCount && newRowCount) {
             m_db.writeHeader(newRowCount);
+
             const auto c = m_db.calcRowCount();
             const auto r = m_db.rowCount();
             assert(c == r);
@@ -545,7 +566,7 @@ namespace tests {
         bool thrown = false;
         try {
             // this will throw as it encounters fucked-up uids when
-            // ir re-indexes after saving.
+            // it re-indexes after saving.
             db2023::DBWriter myWriter(db, [&](typename DB::RecordType& r) {
                 if (r.uid % 10 == 0) {
                     r.uid = 10;
@@ -556,7 +577,8 @@ namespace tests {
                 return true;
             });
         } catch (const std::exception& e) {
-            std::cerr << "GOOD! Threw " << e.what() << ", as expected";
+            std::cout << "GOOD! Threw " << e.what() << ", as expected"
+                      << std::endl;
             thrown = true;
         }
 
@@ -572,7 +594,6 @@ namespace tests {
         bool threw = false;
         try {
             db2023::DB<R> badDB(filePath, [](const R&) { return 0; });
-
         } catch (const std::exception& e) {
             std::cerr << "Good. expected this exception: " << e.what()
                       << std::endl;
@@ -586,7 +607,6 @@ namespace tests {
             db2023::DB<R> repairedDB(
                 filePath, [](const R&) { return 0; },
                 db2023::ReadFlags::repairFlag);
-
         } catch (const std::exception& e) {
             std::cerr << "BAD! did not expect this exception: " << e.what()
                       << std::endl;
@@ -626,6 +646,8 @@ int main() {
     bool threw = false;
 
     std::string filePath("test.db");
+
+    my::stopwatch sw("Opening database ");
     // This one should not throw (though it may be empty)
     db2023::DB<mystruct> DB(filePath, [](const mystruct&) { return 0; });
     try {
@@ -638,10 +660,12 @@ int main() {
         threw = true;
     }
     assert(threw);
+    sw.stop_and_print();
 
     size_t ctr = 0;
     const auto countNow = DB.rowCount();
     if (countNow < 100) {
+        my::stopwatch sww("Writing 100 records ");
         db2023::DBWriter myWriter(DB, [&](mystruct& r) {
             const auto s = std::to_string(ctr);
             memcpy(r.artist, s.data(), s.size());
@@ -652,12 +676,15 @@ int main() {
 
     const auto newCount = DB.rowCount() + 10;
     ctr = DB.rowCount();
-    db2023::DBWriter myWriter(DB, [&](mystruct& r) {
-        const auto s = std::to_string(ctr);
-        memcpy(r.artist, s.data(), s.size());
-        if (ctr++ >= newCount) return 0;
-        return 1;
-    });
+    {
+        my::stopwatch swc("Writing 10 records, and setting artist ");
+        db2023::DBWriter myWriter(DB, [&](mystruct& r) {
+            const auto s = std::to_string(ctr);
+            memcpy(r.artist, s.data(), s.size());
+            if (ctr++ >= newCount) return 0;
+            return 1;
+        });
+    }
 
     const auto myCount = DB.rowCount();
     assert(myCount == newCount);
@@ -665,7 +692,10 @@ int main() {
     assert(rwIndex == myCount - 1);
     cout << "There are now " << myCount << " rows in the db." << endl;
 
-    db2023::tests::testRepair(DB);
+    {
+        my::stopwatch swd("Breaking and repairing");
+        db2023::tests::testRepair(DB);
+    }
 
     return 0;
 }
