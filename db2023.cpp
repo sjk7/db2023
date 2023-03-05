@@ -138,13 +138,13 @@ template <typename R> class DB {
     void writeHeader(
         const header& h, std::fstream& f, const std::string& filePath) {
         m_hdr = h;
-        m_f.seekp(0);
-        m_f.write((char*)&h, sizeof(h));
+        f.seekp(0);
+        f.write((char*)&h, sizeof(h));
         if (!m_f) {
             throw std::runtime_error(
                 "Cannot write header to file: " + filePath);
         }
-        m_f.flush();
+        f.flush();
     }
 
     void writeHeader(countType newRowCount) {
@@ -184,7 +184,8 @@ template <typename R> class DB {
 
     countType calcRowCount() {
         const auto sz = fileSize(m_filePath);
-        if (sz <= sizeof(m_hdr)) return 0;
+        if (sz <= (std::ios::off_type) sizeof(m_hdr)) 
+        return 0;
         const double adjustedSize = (double)(sz - sizeof(m_hdr));
         double dec = 0;
         const auto fractPart = std::modf(adjustedSize, &dec);
@@ -203,7 +204,6 @@ template <typename R> class DB {
     auto seekToRecord(
         const countType where, unsigned int which = SeekWhat::read) {
         const auto start = sizeof(m_hdr);
-        const auto avail = fileSize(m_filePath);
         const auto pos = start + (where * sizeof(R));
         if (which & SeekWhat::read) {
             m_f.seekg(pos);
@@ -247,7 +247,7 @@ template <typename R> class DB {
             if (r.uid - 1 >= m_uidIndex.size()) {
                 const auto old_size = m_uidIndex.size();
                 m_uidIndex.resize(r.uid);
-                const auto new_size = m_uidIndex.size();
+  
                 std::fill(m_uidIndex.begin() + old_size, m_uidIndex.end(),
                     INVALID_ROW);
                 m_state |= DBState::uidsInconsistent;

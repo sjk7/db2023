@@ -8,6 +8,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_executable(sample db2023.cpp)
+if(MSVC)
+  target_compile_options(sample PRIVATE /W4 /WX)
+else()
+  target_compile_options(sample PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
 
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})
 set(CPACK_PROJECT_VERSION ${PROJECT_VERSION})
